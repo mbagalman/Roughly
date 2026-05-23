@@ -1,0 +1,1114 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Roughly — a Fermi estimator</title>
+    <meta name="description" content="Roughly: build Fermi estimates in your browser. Chain multiplicative factors with lower / best / upper bounds and get a 90% range from a 10,000-trial log-normal Monte Carlo. No backend, no tracking.">
+    <meta name="theme-color" content="#4F46E5">
+    <meta property="og:title" content="Roughly — a Fermi estimator">
+    <meta property="og:description" content="Build Fermi estimates in your browser. Chain multiplicative factors with lower / best / upper bounds and get a 90% range from log-normal Monte Carlo.">
+    <meta property="og:type" content="website">
+    <meta name="twitter:card" content="summary">
+    <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🎯</text></svg>">
+    <script src="https://cdn.tailwindcss.com/3.4.0"></script>
+    <script defer src="https://unpkg.com/alpinejs@3.14.1/dist/cdn.min.js"></script>
+    <style>
+        :root {
+            color-scheme: light;
+        }
+
+        body {
+            font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+        }
+
+        input[type="number"]::-webkit-inner-spin-button,
+        input[type="number"]::-webkit-outer-spin-button {
+            -webkit-appearance: none;
+            margin: 0;
+        }
+
+        input[type="number"] {
+            -moz-appearance: textfield;
+        }
+
+        @media print {
+            body {
+                padding: 0 !important;
+                background: white !important;
+            }
+            main {
+                max-width: none !important;
+                padding: 0.5cm !important;
+                border-radius: 0 !important;
+                box-shadow: none !important;
+            }
+            .rounded-3xl, .shadow-xl, .shadow-sm {
+                box-shadow: none !important;
+            }
+            /* Avoid awkward page breaks inside a step row or the summary section */
+            [role="group"], section > .rounded-3xl, section > details {
+                break-inside: avoid;
+                page-break-inside: avoid;
+            }
+            /* Inputs print as plain text on the page rather than form fields */
+            input[type="text"], input:not([type]) {
+                border: none !important;
+                background: transparent !important;
+                padding: 0 !important;
+            }
+            /* Strip the op-toggle button chrome so the operator reads as plain text */
+            [role="switch"] {
+                border: none !important;
+                background: transparent !important;
+                padding: 0 !important;
+            }
+        }
+    </style>
+</head>
+<body class="bg-slate-100 min-h-screen p-4 md:p-8">
+    <main x-data="fermiApp()" x-init="init()" @keydown.window="handleGlobalKeydown($event)" class="max-w-3xl mx-auto bg-white p-6 rounded-3xl shadow-xl">
+        <header class="mb-6">
+            <h1 class="text-3xl font-bold text-slate-900">Roughly</h1>
+            <p class="mt-2 text-slate-600">A Fermi estimator. Chain factors with lower, best, and upper bounds; get a 90% range from log-normal Monte Carlo.</p>
+        </header>
+
+        <section class="space-y-6">
+            <div class="rounded-3xl border border-slate-200 bg-slate-50 p-5">
+                <label for="fermi-problem" class="block text-sm font-semibold text-slate-700">What are you estimating?</label>
+                <input id="fermi-problem" type="text" x-model="problem" @input="save()" placeholder="e.g. number of piano tuners in Chicago" class="mt-3 w-full rounded-2xl border border-slate-300 px-4 py-3 focus:outline-none focus:ring-2 focus:ring-indigo-400">
+            </div>
+
+            <div class="rounded-3xl border border-slate-200 bg-slate-50 p-5">
+                <div class="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
+                    <div>
+                        <h2 class="text-lg font-semibold text-slate-800">Estimate steps</h2>
+                        <p class="mt-1 text-sm text-slate-500">Use one row per factor. Values can be plain numbers (<code class="rounded bg-slate-200 px-1">2700000</code>), scaled (<code class="rounded bg-slate-200 px-1">2.7M</code>), scientific (<code class="rounded bg-slate-200 px-1">1e6</code>), fractions (<code class="rounded bg-slate-200 px-1">1/150</code>), or percentages (<code class="rounded bg-slate-200 px-1">33%</code>).</p>
+                    </div>
+                    <div class="flex flex-wrap gap-2 print:hidden">
+                        <button @click="addStep()" class="rounded-full border border-indigo-300 bg-indigo-50 px-4 py-2 text-sm text-indigo-700 hover:bg-indigo-100 focus:outline-none focus:ring-2 focus:ring-indigo-400 max-md:min-h-11">Add step</button>
+                        <button @click="clearAll()" class="rounded-full border border-slate-300 bg-white px-4 py-2 text-sm text-slate-700 hover:bg-slate-100 focus:outline-none focus:ring-2 focus:ring-indigo-400 max-md:min-h-11">Clear</button>
+                    </div>
+                </div>
+
+                <div x-show="clearUndoSnapshot"
+                     role="status"
+                     aria-live="polite"
+                     class="mt-4 flex items-center justify-between gap-3 rounded-2xl border border-amber-200 bg-amber-50 px-4 py-2 text-sm text-amber-900 print:hidden">
+                    <span>Estimate cleared.</span>
+                    <button @click="undoClear()" class="rounded-full border border-amber-300 bg-white px-4 py-1 font-semibold text-amber-800 hover:bg-amber-100 focus:outline-none focus:ring-2 focus:ring-amber-400 max-md:min-h-11">Undo</button>
+                </div>
+
+                <div class="mt-5 space-y-3">
+                    <template x-for="(step, index) in steps" :key="index">
+                        <div :data-step-row="index" role="group" :aria-label="stepLabel(index, 'group')" class="rounded-3xl border border-slate-200 bg-white p-4">
+                            <div class="grid gap-3 md:grid-cols-[2fr_auto_1fr_1fr_1fr_auto_auto_auto]">
+                                <input x-model="step.name" @input="save()" placeholder="Step description" :aria-label="stepLabel(index, 'name')" class="w-full min-w-0 rounded-2xl border border-slate-300 px-3 py-2">
+
+                                <div class="grid grid-cols-[auto_1fr_1fr_1fr] items-center gap-2 md:contents">
+                                    <button type="button" role="switch"
+                                            :aria-checked="step.op === '/'"
+                                            :aria-label="stepLabel(index, 'op') + ' (currently ' + (step.op === '/' ? 'divide' : 'multiply') + ')'"
+                                            @click="step.op = step.op === '/' ? '*' : '/'; save()"
+                                            :title="step.op === '/' ? 'Divide by this factor (click to switch to multiply)' : 'Multiply by this factor (click to switch to divide)'"
+                                            :class="step.op === '/' ? 'bg-amber-100 text-amber-900 border-amber-300 hover:bg-amber-200' : 'bg-slate-100 text-slate-700 border-slate-300 hover:bg-slate-200'"
+                                            class="md:self-center rounded-full border px-4 py-2 text-base font-semibold leading-none focus:outline-none focus:ring-2 focus:ring-indigo-400 max-md:min-h-11">
+                                        <span x-text="step.op === '/' ? '÷' : '×'" aria-hidden="true"></span>
+                                    </button>
+                                    <input x-model="step.min" @input="save()" placeholder="Lower" :aria-label="stepLabel(index, 'lower')" inputmode="text" autocomplete="off" spellcheck="false" class="w-full min-w-0 rounded-2xl border border-slate-300 px-3 py-2 text-center" :class="parseValue(step.min) === null && step.min !== '' ? 'border-rose-300 bg-rose-50' : ''">
+                                    <input x-model="step.best" @input="save()" placeholder="Best" :aria-label="stepLabel(index, 'best')" inputmode="text" autocomplete="off" spellcheck="false" class="w-full min-w-0 rounded-2xl border border-slate-300 px-3 py-2 text-center" :class="parseValue(step.best) === null && step.best !== '' ? 'border-rose-300 bg-rose-50' : ''">
+                                    <input x-model="step.max" @input="save()" @keydown.enter.prevent="handleEnterOnUpper(index)" placeholder="Upper" :aria-label="stepLabel(index, 'upper')" title="Press Enter to add a new step below" inputmode="text" autocomplete="off" spellcheck="false" class="w-full min-w-0 rounded-2xl border border-slate-300 px-3 py-2 text-center" :class="parseValue(step.max) === null && step.max !== '' ? 'border-rose-300 bg-rose-50' : ''">
+                                </div>
+
+                                <div class="grid grid-cols-[auto_1fr_1fr] items-center gap-2 md:contents print:hidden">
+                                    <div class="md:self-center flex flex-col gap-1">
+                                        <button type="button" data-move-up
+                                                @click="moveStep(index, -1)"
+                                                :disabled="index === 0"
+                                                title="Move step up"
+                                                :aria-label="stepLabel(index, 'moveUp')"
+                                                class="rounded bg-slate-100 px-3 py-1 md:px-2 md:py-0.5 text-xs leading-none text-slate-700 hover:bg-slate-200 focus:outline-none focus:ring-2 focus:ring-indigo-400 disabled:opacity-30 disabled:cursor-not-allowed disabled:hover:bg-slate-100"><span aria-hidden="true">▲</span></button>
+                                        <button type="button" data-move-down
+                                                @click="moveStep(index, 1)"
+                                                :disabled="index === steps.length - 1"
+                                                title="Move step down"
+                                                :aria-label="stepLabel(index, 'moveDown')"
+                                                class="rounded bg-slate-100 px-3 py-1 md:px-2 md:py-0.5 text-xs leading-none text-slate-700 hover:bg-slate-200 focus:outline-none focus:ring-2 focus:ring-indigo-400 disabled:opacity-30 disabled:cursor-not-allowed disabled:hover:bg-slate-100"><span aria-hidden="true">▼</span></button>
+                                    </div>
+                                    <button @click="duplicateStep(index)" :aria-label="stepLabel(index, 'duplicate')" title="Duplicate this step (Ctrl/Cmd+D)" class="md:self-center rounded-full bg-slate-100 px-3 py-2 text-slate-700 hover:bg-slate-200 focus:outline-none focus:ring-2 focus:ring-indigo-400 max-md:min-h-11">Duplicate</button>
+                                    <button @click="removeStep(index)" :aria-label="stepLabel(index, 'remove')" title="Remove this step" class="md:self-center rounded-full bg-rose-100 px-3 py-2 text-rose-600 hover:bg-rose-200 focus:outline-none focus:ring-2 focus:ring-indigo-400 max-md:min-h-11">Remove</button>
+                                </div>
+                            </div>
+                            <template x-if="stepIssues(step).length > 0">
+                                <div class="mt-2 space-y-1 text-xs text-rose-700">
+                                    <template x-for="issue in stepIssues(step)" :key="issue">
+                                        <div x-text="issue"></div>
+                                    </template>
+                                </div>
+                            </template>
+                            <template x-if="stepStatus(step) === 'incomplete'">
+                                <div class="mt-2 text-xs italic text-slate-500">Not included in the estimate — fill in all three values to add this step.</div>
+                            </template>
+                        </div>
+                    </template>
+                </div>
+            </div>
+
+            <div class="rounded-3xl border border-slate-200 bg-indigo-50 p-5">
+                <h2 class="text-lg font-semibold text-indigo-900">Summary</h2>
+
+                <div x-show="!result.valid" class="mt-4 rounded-2xl bg-white p-6 text-center text-slate-500">
+                    Enter lower, best, and upper values for at least one step to see an estimate.
+                </div>
+
+                <div x-show="result.valid">
+                    <p class="mt-4 text-base text-indigo-950" aria-live="polite" aria-atomic="true" x-text="resultPhrase"></p>
+
+                    <div class="mt-4 grid gap-4 sm:grid-cols-3">
+                        <div class="rounded-3xl bg-white p-4 shadow-sm">
+                            <div class="text-sm font-medium text-slate-700">Low</div>
+                            <div class="text-xs text-slate-500">5th percentile</div>
+                            <div class="mt-2 text-2xl font-semibold text-rose-600" x-text="formatValue(result.p5)"></div>
+                        </div>
+                        <div class="rounded-3xl bg-white p-4 shadow-sm">
+                            <div class="text-sm font-medium text-slate-700">Best guess</div>
+                            <div class="text-xs text-slate-500">median</div>
+                            <div class="mt-2 text-2xl font-semibold text-indigo-900" x-text="formatValue(result.p50)"></div>
+                        </div>
+                        <div class="rounded-3xl bg-white p-4 shadow-sm">
+                            <div class="text-sm font-medium text-slate-700">High</div>
+                            <div class="text-xs text-slate-500">95th percentile</div>
+                            <div class="mt-2 text-2xl font-semibold text-emerald-700" x-text="formatValue(result.p95)"></div>
+                        </div>
+                    </div>
+
+                    <div class="mt-5" x-show="activeHistogram">
+                        <div class="flex items-center justify-between mb-1">
+                            <div class="text-xs text-slate-500">Estimated distribution</div>
+                            <div class="inline-flex rounded-full border border-slate-300 bg-white text-xs overflow-hidden print:hidden" role="group" aria-label="Axis scale">
+                                <button type="button" @click="setAxisMode('log')"
+                                        :aria-pressed="axisMode === 'log'"
+                                        :class="axisMode === 'log' ? 'bg-indigo-100 text-indigo-800 font-semibold' : 'text-slate-600 hover:bg-slate-50'"
+                                        class="px-3 py-1 transition focus:outline-none focus:ring-2 focus:ring-indigo-400 max-md:min-h-11 max-md:px-4">Log</button>
+                                <button type="button" @click="setAxisMode('linear')"
+                                        :aria-pressed="axisMode === 'linear'"
+                                        :class="axisMode === 'linear' ? 'bg-indigo-100 text-indigo-800 font-semibold' : 'text-slate-600 hover:bg-slate-50'"
+                                        class="px-3 py-1 transition focus:outline-none focus:ring-2 focus:ring-indigo-400 max-md:min-h-11 max-md:px-4">Linear</button>
+                            </div>
+                        </div>
+                        <svg viewBox="0 0 1000 100" class="block w-full h-20" preserveAspectRatio="none" aria-hidden="true">
+                            <path :d="densityPath" fill="rgb(165 180 252 / 0.35)" stroke="rgb(99 102 241)" stroke-width="1.5" vector-effect="non-scaling-stroke"></path>
+                            <line :x1="markerX(result.p5)"  :x2="markerX(result.p5)"  y1="0" y2="100" stroke="rgb(225 29 72)"  stroke-width="2" stroke-dasharray="3 3" vector-effect="non-scaling-stroke"></line>
+                            <line :x1="markerX(result.p50)" :x2="markerX(result.p50)" y1="0" y2="100" stroke="rgb(67 56 202)" stroke-width="2.5" vector-effect="non-scaling-stroke"></line>
+                            <line :x1="markerX(result.p95)" :x2="markerX(result.p95)" y1="0" y2="100" stroke="rgb(4 120 87)"  stroke-width="2" stroke-dasharray="3 3" vector-effect="non-scaling-stroke"></line>
+                        </svg>
+                        <div class="relative h-5 mt-1" aria-hidden="true">
+                            <span class="absolute -translate-x-1/2 whitespace-nowrap text-xs text-rose-600" :style="`left: ${markerX(result.p5)/10}%`" x-text="formatValue(result.p5)"></span>
+                            <span class="absolute -translate-x-1/2 whitespace-nowrap text-xs font-semibold text-indigo-900" :style="`left: ${markerX(result.p50)/10}%`" x-text="formatValue(result.p50)"></span>
+                            <span class="absolute -translate-x-1/2 whitespace-nowrap text-xs text-emerald-700" :style="`left: ${markerX(result.p95)/10}%`" x-text="formatValue(result.p95)"></span>
+                        </div>
+                    </div>
+
+                    <div class="mt-3 text-xs text-slate-500" x-show="result.incompleteCount > 0">
+                        <span x-text="result.incompleteCount"></span> step(s) skipped due to incomplete or invalid values. Fix them above to include those steps.
+                    </div>
+
+                    <div class="mt-4 flex flex-wrap gap-2 print:hidden">
+                        <button type="button"
+                                @click="copyMarkdown()"
+                                :class="copyStatus === 'copied' ? 'border-emerald-300 bg-emerald-50 text-emerald-800' : copyStatus === 'error' ? 'border-rose-300 bg-rose-50 text-rose-800' : 'border-indigo-300 bg-white text-indigo-700 hover:bg-indigo-50'"
+                                class="rounded-full border px-4 py-2 text-sm transition focus:outline-none focus:ring-2 focus:ring-indigo-400 max-md:min-h-11"
+                                x-text="copyLabel">
+                        </button>
+                        <button type="button"
+                                @click="copyShareLink()"
+                                :class="copyLinkStatus === 'copied' ? 'border-emerald-300 bg-emerald-50 text-emerald-800' : copyLinkStatus === 'error' ? 'border-rose-300 bg-rose-50 text-rose-800' : 'border-indigo-300 bg-white text-indigo-700 hover:bg-indigo-50'"
+                                class="rounded-full border px-4 py-2 text-sm transition focus:outline-none focus:ring-2 focus:ring-indigo-400 max-md:min-h-11"
+                                x-text="shareLabel">
+                        </button>
+                        <button type="button"
+                                @click="downloadJson()"
+                                class="rounded-full border border-indigo-300 bg-white px-4 py-2 text-sm text-indigo-700 hover:bg-indigo-50 transition focus:outline-none focus:ring-2 focus:ring-indigo-400 max-md:min-h-11">
+                            Download JSON
+                        </button>
+                    </div>
+                </div>
+            </div>
+
+            <div class="rounded-3xl border border-slate-200 bg-slate-50 p-5 print:hidden">
+                <div class="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+                    <div>
+                        <h2 class="text-lg font-semibold text-slate-800">Example templates</h2>
+                        <p class="mt-1 text-sm text-slate-500">Load a starter estimate and adjust the numbers.</p>
+                    </div>
+                </div>
+                <div class="mt-4 grid gap-3 sm:grid-cols-2">
+                    <template x-for="sample in samples" :key="sample.id">
+                        <button @click="loadSample(sample)" class="rounded-3xl border border-slate-200 bg-white px-4 py-3 text-left text-sm text-slate-700 hover:border-indigo-300 hover:bg-indigo-50 focus:outline-none focus:ring-2 focus:ring-indigo-400">
+                            <div class="font-semibold text-slate-900" x-text="sample.title"></div>
+                            <div class="mt-1 text-slate-500" x-text="sample.description"></div>
+                        </button>
+                    </template>
+                </div>
+            </div>
+
+            <details :open="helpOpen" @toggle="setHelpOpen($event.target.open)" class="rounded-3xl border border-slate-200 bg-white p-5 print:hidden">
+                <summary class="cursor-pointer select-none rounded text-lg font-semibold text-slate-800 focus:outline-none focus:ring-2 focus:ring-indigo-400">How to use &amp; what the numbers mean</summary>
+
+                <div class="mt-4 space-y-5 text-sm text-slate-600">
+                    <div>
+                        <h3 class="mb-2 font-semibold text-slate-800">Quick start</h3>
+                        <ol class="list-inside list-decimal space-y-1">
+                            <li>Type your question into "What are you estimating?"</li>
+                            <li>Add a row for each factor in your reasoning chain. Each row contributes via <span class="font-semibold">×</span> (multiply) or <span class="font-semibold">÷</span> (divide).</li>
+                            <li>For each row, give a lower, best, and upper value.</li>
+                            <li>Read off the summary: a best guess (median) and a 90% range.</li>
+                        </ol>
+                    </div>
+
+                    <div>
+                        <h3 class="mb-2 font-semibold text-slate-800">What is a Fermi estimate?</h3>
+                        <p>A Fermi estimate (named for physicist Enrico Fermi) breaks a hard "how many?" question into a chain of simpler factors you can guess at. Multiply those guesses together and you usually land within an order of magnitude of the truth — even when each individual guess could be off by 2–3×. The lower and upper values on each row encode your uncertainty about that factor; this tool propagates the uncertainty through 10,000 Monte Carlo trials so the final range honestly reflects compound doubt.</p>
+                    </div>
+
+                    <div>
+                        <h3 class="mb-2 font-semibold text-slate-800">Multiply (×) vs divide (÷)</h3>
+                        <p>Most factors multiply into the running estimate. Some divide — typically a "per-X" rate when you're solving for X. Example: to estimate piano tuners in Chicago, multiply <em>population</em> × <em>households/person</em> × <em>pianos/household</em> × <em>tunings/year</em>. But the last factor (<em>tunings per tuner per year</em>) must <strong>divide</strong>, because <span class="font-mono">tuners × tunings/tuner = total tunings</span>, not the other way around. Click the × pill on any row to flip it to ÷.</p>
+                    </div>
+
+                    <div>
+                        <h3 class="mb-2 font-semibold text-slate-800">Reading the result</h3>
+                        <ul class="list-inside list-disc space-y-1">
+                            <li><strong>Best guess</strong> is the median: half the trials came out below, half above.</li>
+                            <li><strong>Low</strong> and <strong>High</strong> are the 5th and 95th percentile — there is a 90% chance the true answer is between them. The remaining 10% is split as tail risk on either side.</li>
+                            <li>The shaded band below the numbers shows the full distribution. <strong>Log scale</strong> (default) makes a log-normal look symmetric; switch to <strong>Linear</strong> if you want to see the underlying right-skew.</li>
+                        </ul>
+                    </div>
+
+                    <div>
+                        <h3 class="mb-2 font-semibold text-slate-800">Input formats</h3>
+                        <p>Values accept plain numbers (<span class="font-mono">2700000</span>), scaled (<span class="font-mono">2.7M</span>, <span class="font-mono">300K</span>, <span class="font-mono">1.2B</span>), scientific (<span class="font-mono">1e6</span>), fractions (<span class="font-mono">1/150</span>), and percentages (<span class="font-mono">33%</span>). Commas are ignored, so <span class="font-mono">2,700,000</span> also works.</p>
+                    </div>
+
+                    <div>
+                        <h3 class="mb-2 font-semibold text-slate-800">Keyboard shortcuts</h3>
+                        <ul class="space-y-2">
+                            <li><kbd class="rounded border border-slate-300 bg-slate-50 px-1.5 py-0.5 font-mono text-xs">Enter</kbd> on the Upper input — add a new row below (or jump to the next row if one exists).</li>
+                            <li><kbd class="rounded border border-slate-300 bg-slate-50 px-1.5 py-0.5 font-mono text-xs">Ctrl</kbd>&nbsp;+&nbsp;<kbd class="rounded border border-slate-300 bg-slate-50 px-1.5 py-0.5 font-mono text-xs">D</kbd> (or <kbd class="rounded border border-slate-300 bg-slate-50 px-1.5 py-0.5 font-mono text-xs">⌘</kbd>&nbsp;+&nbsp;<kbd class="rounded border border-slate-300 bg-slate-50 px-1.5 py-0.5 font-mono text-xs">D</kbd>) when focused inside a row — duplicate that row.</li>
+                            <li><kbd class="rounded border border-slate-300 bg-slate-50 px-1.5 py-0.5 font-mono text-xs">Tab</kbd> — move through inputs left-to-right, top-to-bottom.</li>
+                        </ul>
+                    </div>
+                </div>
+            </details>
+        </section>
+    </main>
+
+    <script>
+        // ===== Smart number parser =====
+        // Accepts plain numbers, scaled suffixes (K/M/B/T), scientific notation,
+        // fractions ("1/150"), percent ("33%"), and comma-grouped digits.
+        // Returns null on any failure so downstream code can distinguish
+        // "incomplete" from "zero".
+
+        const SCALE_SUFFIX = { '': 1, k: 1e3, m: 1e6, b: 1e9, t: 1e12 };
+
+        function parseFermiNumber(input) {
+            if (input === null || input === undefined) return null;
+            if (typeof input === 'number') return Number.isFinite(input) ? input : null;
+            let s = String(input).trim();
+            if (s === '') return null;
+            s = s.replace(/,/g, '');
+
+            if (s.includes('/')) {
+                const parts = s.split('/');
+                if (parts.length !== 2) return null;
+                const num = parseFermiNumber(parts[0]);
+                const den = parseFermiNumber(parts[1]);
+                if (num === null || den === null || den === 0) return null;
+                return num / den;
+            }
+
+            if (s.endsWith('%')) {
+                const inner = parseFermiNumber(s.slice(0, -1));
+                return inner === null ? null : inner / 100;
+            }
+
+            const m = /^([+-]?(?:\d+\.?\d*|\.\d+)(?:[eE][+-]?\d+)?)\s*([kKmMbBtT])?$/.exec(s);
+            if (!m) return null;
+            const base = parseFloat(m[1]);
+            if (!Number.isFinite(base)) return null;
+            const sfx = m[2] ? m[2].toLowerCase() : '';
+            return base * SCALE_SUFFIX[sfx];
+        }
+
+        function escapeMarkdownCell(s) {
+            return String(s == null ? '' : s).replace(/\|/g, '\\|').replace(/\r?\n/g, ' ').trim();
+        }
+
+        function slugify(s) {
+            return String(s || '')
+                .toLowerCase()
+                .replace(/[^a-z0-9]+/g, '-')
+                .replace(/^-+|-+$/g, '')
+                .slice(0, 60) || 'estimate';
+        }
+
+        // ===== Safe localStorage access =====
+        // localStorage can throw SecurityError in private mode / locked-down browsers,
+        // QuotaExceededError when full, or be undefined in some embedded contexts.
+        // These wrappers swallow failures so the app degrades to a session-only mode
+        // rather than breaking init/save/recompute.
+
+        let _storageWarned = false;
+        function _warnStorageOnce(err) {
+            if (_storageWarned) return;
+            _storageWarned = true;
+            console.warn('localStorage unavailable — estimates and preferences will not persist between sessions.', err);
+        }
+
+        function safeStorageGet(key) {
+            try {
+                return window.localStorage.getItem(key);
+            } catch (err) {
+                _warnStorageOnce(err);
+                return null;
+            }
+        }
+
+        function safeStorageSet(key, value) {
+            try {
+                window.localStorage.setItem(key, value);
+                return true;
+            } catch (err) {
+                _warnStorageOnce(err);
+                return false;
+            }
+        }
+
+        function encodeState(state) {
+            const bytes = new TextEncoder().encode(JSON.stringify(state));
+            let binary = '';
+            for (let i = 0; i < bytes.length; i++) binary += String.fromCharCode(bytes[i]);
+            return btoa(binary).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+        }
+
+        function decodeState(s) {
+            try {
+                let b64 = s.replace(/-/g, '+').replace(/_/g, '/');
+                while (b64.length % 4) b64 += '=';
+                const binary = atob(b64);
+                const bytes = new Uint8Array(binary.length);
+                for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+                return JSON.parse(new TextDecoder().decode(bytes));
+            } catch (err) {
+                return null;
+            }
+        }
+
+        // ===== Monte Carlo math engine =====
+        // Each step's (lower, best, upper) is interpreted as (P5, P50, P95)
+        // of a log-normal distribution. We sample in log-space and aggregate
+        // across steps, then exponentiate to get the result distribution.
+
+        const Z95 = 1.6448536269514722; // 95th percentile of the standard normal
+        const TRIALS = 10000;
+        const MC_SEED = 0x9E3779B1; // fixed seed so identical inputs always yield identical output
+
+        // Small seeded PRNG (Mulberry32). Returns a function that yields floats in [0, 1).
+        function mulberry32(seed) {
+            let s = seed >>> 0;
+            return function() {
+                s = (s + 0x6D2B79F5) >>> 0;
+                let t = s;
+                t = Math.imul(t ^ (t >>> 15), t | 1);
+                t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+                return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+            };
+        }
+
+        let _rng = Math.random;
+
+        function randNormal() {
+            // Box-Muller transform. Loops guard against log(0).
+            let u1 = 0, u2 = 0;
+            while (u1 === 0) u1 = _rng();
+            while (u2 === 0) u2 = _rng();
+            return Math.sqrt(-2 * Math.log(u1)) * Math.cos(2 * Math.PI * u2);
+        }
+
+        function stepLogParams(step) {
+            const lower = parseFermiNumber(step.min);
+            const best  = parseFermiNumber(step.best);
+            const upper = parseFermiNumber(step.max);
+            if (lower === null || best === null || upper === null) return null;
+            if (lower <= 0 || best <= 0 || upper <= 0) return null;
+            if (upper < lower) return null;
+            // (lower, best, upper) are P5 / P50 / P95 of a log-normal, so best must lie
+            // within [lower, upper]. The lower === upper case is also handled here:
+            // best must equal them (zero-variance step), otherwise reject.
+            if (best < lower || best > upper) return null;
+            const mu = Math.log(best);
+            const sigma = (Math.log(upper) - Math.log(lower)) / (2 * Z95);
+            const sign = step.op === '/' ? -1 : 1;
+            return { mu, sigma, sign };
+        }
+
+        function monteCarloEstimate(steps, trials) {
+            trials = trials || TRIALS;
+            _rng = mulberry32(MC_SEED); // reset so identical inputs give identical samples
+            const params = [];
+            let incomplete = 0;
+            for (const step of steps) {
+                const p = stepLogParams(step);
+                if (p) params.push(p);
+                else incomplete++;
+            }
+            if (params.length === 0) {
+                return { p5: NaN, p50: NaN, p95: NaN, valid: false, sampleCount: 0, incompleteCount: incomplete, histograms: null };
+            }
+            const out = new Float64Array(trials);
+            for (let t = 0; t < trials; t++) {
+                let logSum = 0;
+                for (let i = 0; i < params.length; i++) {
+                    const p = params[i];
+                    logSum += p.sign * (p.mu + p.sigma * randNormal());
+                }
+                out[t] = Math.exp(logSum);
+            }
+            out.sort();
+            return {
+                p5:  out[Math.floor(0.05 * trials)],
+                p50: out[Math.floor(0.50 * trials)],
+                p95: out[Math.floor(0.95 * trials)],
+                valid: true,
+                sampleCount: trials,
+                incompleteCount: incomplete,
+                histograms: buildHistograms(out, 50)
+            };
+        }
+
+        function buildHistograms(sortedSamples, binCount) {
+            const n = sortedSamples.length;
+            if (n === 0) return null;
+            // Trim extreme tails so the central 98% of mass dominates the visual range.
+            const lo = sortedSamples[Math.floor(0.01 * n)];
+            const hi = sortedSamples[Math.floor(0.99 * n)];
+            if (!Number.isFinite(lo) || !Number.isFinite(hi) || hi === lo) return null;
+
+            const log = (lo > 0) ? buildBins(sortedSamples, lo, hi, binCount, true) : null;
+            const linear = buildBins(sortedSamples, lo, hi, binCount, false);
+            return { log, linear };
+        }
+
+        function buildBins(sortedSamples, lo, hi, binCount, useLog) {
+            const xMin = useLog ? Math.log(lo) : lo;
+            const xMax = useLog ? Math.log(hi) : hi;
+            const binWidth = (xMax - xMin) / binCount;
+            if (binWidth <= 0) return null;
+            const counts = new Array(binCount).fill(0);
+            for (let i = 0; i < sortedSamples.length; i++) {
+                const v = sortedSamples[i];
+                if (v < lo || v > hi) continue;
+                const x = useLog ? Math.log(v) : v;
+                let idx = Math.floor((x - xMin) / binWidth);
+                if (idx >= binCount) idx = binCount - 1;
+                if (idx < 0) idx = 0;
+                counts[idx]++;
+            }
+            return { xMin, xMax, binWidth, counts, useLog, lo, hi };
+        }
+
+        // ===== Smoke tests (opt-in: append ?test to the URL, e.g. roughly.html?test) =====
+        // Skipped by default so production loads don't pay the Monte Carlo cost or
+        // spam the console. Append ?test (or ?test=1) to run them.
+        (function smokeTests() {
+            if (!new URLSearchParams(window.location.search).has('test')) return;
+            console.info('Running Roughly self-tests…');
+            // --- Parser ---
+            const parserCases = [
+                ['2700000',    2700000],
+                ['2.7M',       2700000],
+                ['2.7m',       2700000],
+                ['300K',       300000],
+                ['1.2B',       1.2e9],
+                ['1.5T',       1.5e12],
+                ['1e6',        1e6],
+                ['2.7e6',      2700000],
+                ['1.5e-3',     0.0015],
+                ['.5',         0.5],
+                ['2,700,000',  2700000],
+                ['2.7 M',      2700000],
+                ['1/150',      1/150],
+                ['33%',        0.33],
+                ['',           null],
+                ['   ',        null],
+                ['abc',        null],
+                ['5.5.5',      null],
+                ['K',          null],
+                ['1/0',        null]
+            ];
+            for (const [input, expected] of parserCases) {
+                const got = parseFermiNumber(input);
+                const ok = expected === null
+                    ? got === null
+                    : got !== null && Math.abs(got - expected) < 1e-9;
+                console.assert(ok, 'parseFermiNumber(', JSON.stringify(input), ') expected', expected, 'got', got);
+            }
+
+            // --- Engine: zero-variance single step returns exact value ---
+            const single = monteCarloEstimate([{ min: '10', best: '10', max: '10' }]);
+            console.assert(
+                Math.abs(single.p50 - 10) < 1e-9,
+                'Engine: zero-variance single step should return exact value, got', single.p50
+            );
+
+            // --- Engine: reject impossible (lower, best, upper) triples ---
+            const bestBelowLower = monteCarloEstimate([{ min: '10', best: '5',   max: '20' }]);
+            console.assert(!bestBelowLower.valid, 'Engine: should reject best < lower');
+            const bestAboveUpper = monteCarloEstimate([{ min: '10', best: '100', max: '20' }]);
+            console.assert(!bestAboveUpper.valid, 'Engine: should reject best > upper');
+            const flatMismatch   = monteCarloEstimate([{ min: '10', best: '15',  max: '10' }]);
+            console.assert(!flatMismatch.valid,   'Engine: should reject lower === upper with mismatched best');
+
+            // --- Engine: piano tuners with smart-formatted inputs and a divisor step ---
+            const pianoTuners = [
+                { name: 'Chicago population',                min: '2M',   best: '2.7M', max: '3.5M' },
+                { name: 'Households per person',             min: '0.25', best: '0.33', max: '0.4' },
+                { name: 'Pianos per household',              min: '2%',   best: '5%',   max: '8%' },
+                { name: 'Tuning frequency per year',         min: '1',    best: '2',    max: '3' },
+                { name: 'Pianos tuned per tuner per year',   min: '100',  best: '150',  max: '250', op: '/' }
+            ];
+            const tuners = monteCarloEstimate(pianoTuners);
+            console.assert(
+                tuners.p50 >= 150 && tuners.p50 <= 1000,
+                'Engine: piano tuners P50 expected in [150, 1000], got', tuners.p50
+            );
+            console.info(
+                'Roughly smoke tests OK. Piano tuners P5/P50/P95 =',
+                Math.round(tuners.p5), '/', Math.round(tuners.p50), '/', Math.round(tuners.p95)
+            );
+        })();
+
+        // ===== Alpine component =====
+        function fermiApp() {
+            return {
+                problem: '',
+                steps: [
+                    { name: 'Population of city',          min: '100K', best: '250K', max: '1M',   op: '*' },
+                    { name: 'Fraction using the service',  min: '1%',   best: '3%',   max: '6%',   op: '*' },
+                    { name: 'Average usage per person',    min: '1',    best: '2',    max: '4',    op: '*' }
+                ],
+
+                samples: [
+                    {
+                        id: 1,
+                        title: 'Piano tuners in Chicago',
+                        description: 'Population × households × pianos × tunings/year, divided by tunings/tuner/year.',
+                        problem: 'Number of piano tuners in Chicago',
+                        steps: [
+                            { name: 'Chicago population',                min: '2M',   best: '2.7M', max: '3.5M', op: '*' },
+                            { name: 'Households per person',             min: '0.25', best: '0.33', max: '0.4',  op: '*' },
+                            { name: 'Pianos per household',              min: '2%',   best: '5%',   max: '8%',   op: '*' },
+                            { name: 'Tuning frequency per year',         min: '1',    best: '2',    max: '3',    op: '*' },
+                            { name: 'Pianos tuned per tuner per year',   min: '100',  best: '150',  max: '250',  op: '/' }
+                        ]
+                    },
+                    {
+                        id: 2,
+                        title: 'Daily pizza slices in NYC',
+                        description: 'Estimate daily pizza demand by population and slice rate.',
+                        problem: 'Daily pizza slices eaten in New York City',
+                        steps: [
+                            { name: 'NYC population',      min: '7M',  best: '8M',   max: '8.5M', op: '*' },
+                            { name: 'People eating pizza', min: '20%', best: '35%',  max: '50%',  op: '*' },
+                            { name: 'Slices per person',   min: '1',   best: '2',    max: '3',    op: '*' }
+                        ]
+                    },
+                    {
+                        id: 3,
+                        title: 'Annual books read',
+                        description: 'Estimate annual books read by a team of librarians.',
+                        problem: 'Books read per year by a library team',
+                        steps: [
+                            { name: 'Librarians on team',                  min: '10', best: '15', max: '20', op: '*' },
+                            { name: 'Books read per librarian per week',   min: '1',  best: '2',  max: '4',  op: '*' },
+                            { name: 'Weeks per year reading',              min: '40', best: '48', max: '50', op: '*' }
+                        ]
+                    },
+                    {
+                        id: 4,
+                        title: 'Hairdressers in your city',
+                        description: 'Population × haircuts per person per year, divided by haircuts per hairdresser per year.',
+                        problem: 'How many hairdressers and barbers work in your city',
+                        steps: [
+                            { name: 'City population',                       min: '100K', best: '500K', max: '2M',   op: '*' },
+                            { name: 'Haircuts per person per year',          min: '3',    best: '6',    max: '10',   op: '*' },
+                            { name: 'Haircuts per hairdresser per year',     min: '1500', best: '2500', max: '4000', op: '/' }
+                        ]
+                    }
+                ],
+
+                result: { p5: NaN, p50: NaN, p95: NaN, valid: false, sampleCount: 0, incompleteCount: 0, histograms: null },
+
+                axisMode: 'log',
+                helpOpen: true,
+
+                clearUndoSnapshot: null,
+                clearUndoTimerId: null,
+
+                copyStatus: 'idle',
+                copyTimerId: null,
+
+                copyLinkStatus: 'idle',
+                copyLinkTimerId: null,
+
+                hashUpdateTimerId: null,
+
+                parseValue(v) { return parseFermiNumber(v); },
+
+                stepLabel(index, field) {
+                    if (field === 'name') return `Description for step ${index + 1}`;
+                    const step = this.steps[index];
+                    const named = step && step.name ? step.name.trim() : '';
+                    const ref = named || `step ${index + 1}`;
+                    switch (field) {
+                        case 'op':        return `Operator for ${ref}`;
+                        case 'lower':     return `Lower bound for ${ref}`;
+                        case 'best':      return `Best estimate for ${ref}`;
+                        case 'upper':     return `Upper bound for ${ref}`;
+                        case 'moveUp':    return `Move ${ref} up`;
+                        case 'moveDown':  return `Move ${ref} down`;
+                        case 'duplicate': return `Duplicate ${ref}`;
+                        case 'remove':    return `Remove ${ref}`;
+                        case 'group':     return `Step ${index + 1}${named ? ': ' + named : ''}`;
+                        default:          return '';
+                    }
+                },
+
+                stepStatus(step) {
+                    const allBlank =
+                        (step.min  === '' || step.min  == null) &&
+                        (step.best === '' || step.best == null) &&
+                        (step.max  === '' || step.max  == null);
+                    if (allBlank) return 'empty';
+                    const lower = parseFermiNumber(step.min);
+                    const best  = parseFermiNumber(step.best);
+                    const upper = parseFermiNumber(step.max);
+                    if (lower === null || best === null || upper === null) return 'incomplete';
+                    if (lower <= 0 || best <= 0 || upper <= 0) return 'invalid';
+                    if (upper < lower) return 'invalid';
+                    if (best < lower || best > upper) return 'invalid';
+                    return 'valid';
+                },
+
+                stepIssues(step) {
+                    const lower = parseFermiNumber(step.min);
+                    const best  = parseFermiNumber(step.best);
+                    const upper = parseFermiNumber(step.max);
+                    const issues = [];
+                    if (lower !== null && best !== null && upper !== null) {
+                        const hasZero = lower === 0 || best === 0 || upper === 0;
+                        const hasNegative = lower < 0 || best < 0 || upper < 0;
+                        if (step.op === '/' && hasZero) {
+                            issues.push('Cannot divide by zero. Replace any 0 above with a value greater than 0.');
+                        } else if (hasZero || hasNegative) {
+                            issues.push('Values must be greater than zero (the log-normal model requires positive numbers).');
+                        } else if (upper < lower) {
+                            issues.push('Upper bound must be greater than or equal to Lower bound.');
+                        } else if (best < lower) {
+                            issues.push('Best estimate must be greater than or equal to Lower bound.');
+                        } else if (best > upper) {
+                            issues.push('Best estimate must be less than or equal to Upper bound.');
+                        }
+                    }
+                    return issues;
+                },
+
+                normalizeStep(s) {
+                    return {
+                        name: typeof s.name === 'string' ? s.name : '',
+                        op:   s.op === '/' ? '/' : '*',
+                        min:  s.min === undefined || s.min === null ? '' : String(s.min),
+                        best: s.best === undefined || s.best === null ? '' : String(s.best),
+                        max:  s.max === undefined || s.max === null ? '' : String(s.max)
+                    };
+                },
+
+                init() {
+                    const savedMode = safeStorageGet('roughly-axis-mode');
+                    if (savedMode === 'log' || savedMode === 'linear') {
+                        this.axisMode = savedMode;
+                    }
+                    const savedHelp = safeStorageGet('roughly-help-open');
+                    if (savedHelp === '0') this.helpOpen = false;
+
+                    let loadedFromHash = false;
+                    const hashState = this.readHashState();
+                    if (hashState && typeof hashState === 'object' && Array.isArray(hashState.steps)) {
+                        if (typeof hashState.problem === 'string') this.problem = hashState.problem;
+                        // Honour empty arrays — a deliberately-cleared shared link should
+                        // reproduce as empty, not fall back to defaults.
+                        this.steps = hashState.steps.map(s => this.normalizeStep(s));
+                        loadedFromHash = true;
+                    }
+
+                    if (!loadedFromHash) {
+                        const saved = safeStorageGet('roughly-state');
+                        if (saved) {
+                            try {
+                                const data = JSON.parse(saved);
+                                if (typeof data.problem === 'string') this.problem = data.problem;
+                                if (Array.isArray(data.steps)) {
+                                    // Honour empty arrays — if the user removed every row
+                                    // and reloaded, they should see the empty state, not
+                                    // get the constructor defaults back.
+                                    this.steps = data.steps.map(s => this.normalizeStep(s));
+                                }
+                            } catch (error) {
+                                console.warn('Could not restore saved estimate:', error);
+                            }
+                        }
+                    }
+                    this.recompute();
+                },
+
+                readHashState() {
+                    const hash = window.location.hash;
+                    if (!hash) return null;
+                    const m = hash.match(/^#e=([A-Za-z0-9_-]+)/);
+                    if (!m) return null;
+                    return decodeState(m[1]);
+                },
+
+                scheduleHashUpdate() {
+                    if (this.hashUpdateTimerId) clearTimeout(this.hashUpdateTimerId);
+                    this.hashUpdateTimerId = setTimeout(() => {
+                        this.updateHashNow();
+                        this.hashUpdateTimerId = null;
+                    }, 500);
+                },
+
+                updateHashNow() {
+                    try {
+                        const encoded = encodeState({ problem: this.problem, steps: this.steps });
+                        history.replaceState(null, '', '#e=' + encoded);
+                    } catch (err) {
+                        console.warn('Could not update URL hash:', err);
+                    }
+                },
+
+                async copyShareLink() {
+                    this.updateHashNow();
+                    const url = window.location.href;
+                    let ok = false;
+                    if (navigator.clipboard && window.isSecureContext) {
+                        try {
+                            await navigator.clipboard.writeText(url);
+                            ok = true;
+                        } catch (err) {
+                            console.warn('Clipboard API failed, falling back:', err);
+                        }
+                    }
+                    if (!ok) ok = this.fallbackCopy(url);
+                    this.copyLinkStatus = ok ? 'copied' : 'error';
+                    if (this.copyLinkTimerId) clearTimeout(this.copyLinkTimerId);
+                    this.copyLinkTimerId = setTimeout(() => {
+                        this.copyLinkStatus = 'idle';
+                        this.copyLinkTimerId = null;
+                    }, 2000);
+                },
+
+                get shareLabel() {
+                    if (this.copyLinkStatus === 'copied') return '✓ Link copied';
+                    if (this.copyLinkStatus === 'error')  return 'Copy failed — try again';
+                    return 'Copy share link';
+                },
+
+                downloadJson() {
+                    const payload = {
+                        problem: this.problem,
+                        steps: this.steps,
+                        result: this.result.valid ? {
+                            p5: this.result.p5,
+                            p50: this.result.p50,
+                            p95: this.result.p95,
+                            sampleCount: this.result.sampleCount,
+                            incompleteCount: this.result.incompleteCount
+                        } : null,
+                        exportedAt: new Date().toISOString()
+                    };
+                    const json = JSON.stringify(payload, null, 2);
+                    const blob = new Blob([json], { type: 'application/json' });
+                    const url = URL.createObjectURL(blob);
+                    const slug = slugify(this.problem);
+                    const date = new Date().toISOString().slice(0, 10);
+                    const a = document.createElement('a');
+                    a.href = url;
+                    a.download = `roughly-${slug}-${date}.json`;
+                    document.body.appendChild(a);
+                    a.click();
+                    document.body.removeChild(a);
+                    URL.revokeObjectURL(url);
+                },
+
+                setAxisMode(mode) {
+                    if (mode !== 'log' && mode !== 'linear') return;
+                    this.axisMode = mode;
+                    safeStorageSet('roughly-axis-mode', mode);
+                },
+
+                setHelpOpen(open) {
+                    this.helpOpen = !!open;
+                    safeStorageSet('roughly-help-open', this.helpOpen ? '1' : '0');
+                },
+
+                save() {
+                    const payload = { problem: this.problem, steps: this.steps };
+                    safeStorageSet('roughly-state', JSON.stringify(payload));
+                    this.recompute();
+                    this.scheduleHashUpdate();
+                },
+
+                recompute() {
+                    this.result = monteCarloEstimate(this.steps);
+                },
+
+                addStep() {
+                    this.steps.push({ name: '', min: '', best: '', max: '', op: '*' });
+                    this.save();
+                    this.focusDescription(this.steps.length - 1);
+                },
+
+                removeStep(index) {
+                    this.steps.splice(index, 1);
+                    this.save();
+                },
+
+                duplicateStep(index) {
+                    if (index < 0 || index >= this.steps.length) return;
+                    const copy = JSON.parse(JSON.stringify(this.steps[index]));
+                    this.steps.splice(index + 1, 0, copy);
+                    this.save();
+                    this.focusDescription(index + 1, { select: true });
+                },
+
+                moveStep(index, direction) {
+                    const newIndex = index + direction;
+                    if (newIndex < 0 || newIndex >= this.steps.length) return;
+                    const [moved] = this.steps.splice(index, 1);
+                    this.steps.splice(newIndex, 0, moved);
+                    this.save();
+                    this.$nextTick(() => {
+                        const rows = document.querySelectorAll('[data-step-row]');
+                        const newRow = rows[newIndex];
+                        if (!newRow) return;
+                        const primary = direction < 0 ? '[data-move-up]' : '[data-move-down]';
+                        const fallback = direction < 0 ? '[data-move-down]' : '[data-move-up]';
+                        const target = newRow.querySelector(primary + ':not([disabled])')
+                                    || newRow.querySelector(fallback + ':not([disabled])');
+                        if (target) target.focus();
+                    });
+                },
+
+                focusDescription(index, { select = false } = {}) {
+                    this.$nextTick(() => {
+                        const inputs = document.querySelectorAll('input[placeholder="Step description"]');
+                        const target = inputs[index];
+                        if (target) {
+                            target.focus();
+                            if (select) target.select();
+                        }
+                    });
+                },
+
+                handleEnterOnUpper(index) {
+                    if (index === this.steps.length - 1) {
+                        this.addStep();
+                    } else {
+                        this.focusDescription(index + 1);
+                    }
+                },
+
+                handleGlobalKeydown(event) {
+                    if (event.key == null || event.key.toLowerCase() !== 'd') return;
+                    if (!(event.ctrlKey || event.metaKey)) return;
+                    if (event.altKey || event.shiftKey) return;
+                    const active = document.activeElement;
+                    if (!active) return;
+                    const rowContainer = active.closest('[data-step-row]');
+                    if (!rowContainer) return;
+                    const index = parseInt(rowContainer.dataset.stepRow, 10);
+                    if (!Number.isFinite(index)) return;
+                    event.preventDefault();
+                    this.duplicateStep(index);
+                },
+
+                clearAll() {
+                    this.clearUndoSnapshot = {
+                        problem: this.problem,
+                        steps: JSON.parse(JSON.stringify(this.steps))
+                    };
+                    if (this.clearUndoTimerId) clearTimeout(this.clearUndoTimerId);
+                    this.clearUndoTimerId = setTimeout(() => {
+                        this.clearUndoSnapshot = null;
+                        this.clearUndoTimerId = null;
+                    }, 10000);
+                    this.problem = '';
+                    this.steps = [{ name: 'Step 1', min: '', best: '', max: '', op: '*' }];
+                    this.save();
+                },
+
+                undoClear() {
+                    if (!this.clearUndoSnapshot) return;
+                    this.problem = this.clearUndoSnapshot.problem;
+                    this.steps = this.clearUndoSnapshot.steps;
+                    this.clearUndoSnapshot = null;
+                    if (this.clearUndoTimerId) {
+                        clearTimeout(this.clearUndoTimerId);
+                        this.clearUndoTimerId = null;
+                    }
+                    this.save();
+                },
+
+                loadSample(sample) {
+                    this.problem = sample.problem;
+                    this.steps = sample.steps.map(s => this.normalizeStep(s));
+                    this.save();
+                },
+
+                get resultPhrase() {
+                    if (!this.result.valid) return '';
+                    const { p5, p50, p95 } = this.result;
+                    if (!Number.isFinite(p5) || !Number.isFinite(p50) || !Number.isFinite(p95)) return '';
+                    return `Most likely around ${this.formatValue(p50)}, with a 90% chance the true value is between ${this.formatValue(p5)} and ${this.formatValue(p95)}.`;
+                },
+
+                get activeHistogram() {
+                    if (!this.result.valid || !this.result.histograms) return null;
+                    return this.result.histograms[this.axisMode] || null;
+                },
+
+                markerX(value) {
+                    const h = this.activeHistogram;
+                    if (!h || !Number.isFinite(value)) return 0;
+                    if (h.useLog && value <= 0) return 0;
+                    const x = h.useLog ? Math.log(value) : value;
+                    const span = h.xMax - h.xMin;
+                    if (span <= 0) return 500;
+                    const t = (x - h.xMin) / span;
+                    return Math.max(0, Math.min(1, t)) * 1000;
+                },
+
+                get densityPath() {
+                    const h = this.activeHistogram;
+                    if (!h) return '';
+                    const counts = h.counts;
+                    const N = counts.length;
+                    let maxCount = 0;
+                    for (let i = 0; i < N; i++) if (counts[i] > maxCount) maxCount = counts[i];
+                    if (maxCount === 0) return '';
+                    let d = 'M 0 100';
+                    for (let i = 0; i < N; i++) {
+                        const x = ((i + 0.5) / N) * 1000;
+                        const y = 100 - (counts[i] / maxCount) * 85;
+                        d += ` L ${x.toFixed(1)} ${y.toFixed(1)}`;
+                    }
+                    d += ' L 1000 100 Z';
+                    return d;
+                },
+
+                buildMarkdown() {
+                    const lines = [];
+                    const problem = (this.problem || '').trim() || 'Fermi estimate';
+                    lines.push(`**${escapeMarkdownCell(problem)}**`);
+                    lines.push('');
+                    if (this.steps.length > 0) {
+                        lines.push('| # | Step | Op | Lower | Best | Upper |');
+                        lines.push('|---|------|----|-------|------|-------|');
+                        this.steps.forEach((step, i) => {
+                            const name = escapeMarkdownCell(step.name) || '(unnamed)';
+                            const op = step.op === '/' ? '÷' : '×';
+                            const min  = step.min  === '' ? '—' : escapeMarkdownCell(step.min);
+                            const best = step.best === '' ? '—' : escapeMarkdownCell(step.best);
+                            const max  = step.max  === '' ? '—' : escapeMarkdownCell(step.max);
+                            lines.push(`| ${i + 1} | ${name} | ${op} | ${min} | ${best} | ${max} |`);
+                        });
+                        lines.push('');
+                    }
+                    if (this.result.valid) {
+                        lines.push(`**Best guess:** ${this.formatValue(this.result.p50)}`);
+                        lines.push(`**90% range:** ${this.formatValue(this.result.p5)} to ${this.formatValue(this.result.p95)}`);
+                    } else {
+                        lines.push('_Result unavailable — at least one step is incomplete or invalid._');
+                    }
+                    lines.push('');
+                    lines.push('_Generated with Roughly (log-normal Monte Carlo, 10,000 trials)._');
+                    return lines.join('\n');
+                },
+
+                async copyMarkdown() {
+                    const text = this.buildMarkdown();
+                    let ok = false;
+                    if (navigator.clipboard && window.isSecureContext) {
+                        try {
+                            await navigator.clipboard.writeText(text);
+                            ok = true;
+                        } catch (err) {
+                            console.warn('Clipboard API failed, falling back:', err);
+                        }
+                    }
+                    if (!ok) ok = this.fallbackCopy(text);
+                    this.copyStatus = ok ? 'copied' : 'error';
+                    if (this.copyTimerId) clearTimeout(this.copyTimerId);
+                    this.copyTimerId = setTimeout(() => {
+                        this.copyStatus = 'idle';
+                        this.copyTimerId = null;
+                    }, 2000);
+                },
+
+                fallbackCopy(text) {
+                    try {
+                        const ta = document.createElement('textarea');
+                        ta.value = text;
+                        ta.style.position = 'fixed';
+                        ta.style.opacity = '0';
+                        ta.style.pointerEvents = 'none';
+                        document.body.appendChild(ta);
+                        ta.focus();
+                        ta.select();
+                        const ok = document.execCommand('copy');
+                        document.body.removeChild(ta);
+                        return ok;
+                    } catch (err) {
+                        console.warn('Fallback copy failed:', err);
+                        return false;
+                    }
+                },
+
+                get copyLabel() {
+                    if (this.copyStatus === 'copied') return '✓ Copied to clipboard';
+                    if (this.copyStatus === 'error')  return 'Copy failed — try again';
+                    return 'Copy as text';
+                },
+
+                formatValue(value) {
+                    if (!Number.isFinite(value)) return '–';
+                    if (value === 0) return '0';
+                    const abs = Math.abs(value);
+                    if (abs >= 1e12) return (value / 1e12).toFixed(1) + 'T';
+                    if (abs >= 1e9)  return (value / 1e9).toFixed(1) + 'B';
+                    if (abs >= 1e6)  return (value / 1e6).toFixed(1) + 'M';
+                    if (abs >= 1e3)  return (value / 1e3).toFixed(1) + 'K';
+                    if (abs >= 1)    return Number(value).toLocaleString(undefined, { maximumFractionDigits: 2 });
+                    if (abs >= 0.01) return value.toFixed(3);
+                    return value.toExponential(2);
+                }
+            };
+        }
+
+        window.addEventListener('alpine:init', () => {
+            Alpine.data('fermiApp', fermiApp);
+        });
+    </script>
+</body>
+</html>

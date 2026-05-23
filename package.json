@@ -1,0 +1,13 @@
+{
+  "name": "roughly",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Roughly — a browser-only Fermi estimator. Single-file static page in roughly/roughly.html; this package.json exists only to provide a convenient `npm test` script.",
+  "scripts": {
+    "test": "node --test tests/"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}

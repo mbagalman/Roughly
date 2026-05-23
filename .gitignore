@@ -1,0 +1,14 @@
+# Claude Code local metadata
+.claude/
+
+# Node (if tests are run with future dependencies)
+node_modules/
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Editor
+.vscode/
+.idea/
+*.swp

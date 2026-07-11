@@ -24,7 +24,7 @@ Must be done first; everything else depends on these.
 ### P0-1. Implement Monte Carlo math engine ✅ Done
 Log-normal Monte Carlo engine landed: each step's `(lower, best, upper)` interpreted as `(P5, P50, P95)`, 10,000 trials aggregated in log-space, respects per-step `op` (`*` or `/`), reports P5/P50/P95. Result is reactive state recomputed from `save()`. Smoke-test IIFE asserts the piano-tuners sample produces a P50 in [150, 1000] and logs the actual figure on page load.
 
-**Determinism**: RNG is a fixed-seed Mulberry32 (`MC_SEED = 0x9E3779B1`) reset at the top of every `monteCarloEstimate` call. Identical inputs produce identical output across reloads, tabs, and machines — important so shared links via P3-2 reproduce the sender's exact P5/P50/P95.
+**Determinism**: RNG is a fixed-seed Mulberry32 (`MC_SEED = 0x9E3779B1`) reset at the top of every `monteCarloEstimate` call. Identical inputs produce identical output across reloads and tabs on the same browser engine — important so shared links via P3-2 reproduce the sender's P5/P50/P95. (Across different engines the final digits can vary slightly because Box-Muller uses `Math.log`/`Math.cos`, which ECMA-262 leaves implementation-defined.)
 
 **Histogram data**: added as part of P2-1 — engine now also returns `histograms.log` and `histograms.linear` for the visualization.
 
@@ -56,10 +56,10 @@ Piano-tuners last factor uses `op: '/'`, smoke-test asserts P50 ∈ [150, 1000].
 ### P1-4. Validation for incomplete rows ✅ Done
 Decided on the "omit + notify" path. Engine skips rows that can't be parsed into a valid log-normal triple; the UI surfaces this at three levels:
 1. **Cell level**: unparseable non-empty cells get a rose border (from P1-1).
-2. **Row level**: a small italic "Not included in the estimate — fill in all three values to add this step." note appears under rows that have been started but aren't fully filled. Pure empty rows (right after pressing Add) don't get this nag. Rows with semantic problems (zero, negative, upper<lower, **best outside [lower, upper]**) get the explicit error messages from P1-2.
+2. **Row level**: a small italic exclusion note appears under rows missing Lower or Upper. Best is optional and defaults to the geometric midpoint when blank. Pure empty rows (right after pressing Add) don't get a nag. Rows with semantic problems (zero, negative, upper<lower, **best outside [lower, upper]**) get the explicit error messages from P1-2.
 3. **Result level**: when at least one row is valid, an "X step(s) skipped due to incomplete or invalid values" notice appears beneath the bar; when zero rows are valid, the entire Summary block is replaced with "Enter lower, best, and upper values for at least one step to see an estimate."
 
-Validation semantics: `(lower, best, upper)` is treated as (P5, P50, P95) of a log-normal, so the engine requires `0 < lower ≤ best ≤ upper`. Earlier versions only enforced `lower ≤ upper`, which silently accepted impossible triples like `(10, 100, 20)` and produced misleading log-normals (median = 100, spread derived from the lower/upper ratio that didn't actually contain the median). Fixed in `stepLogParams` + `stepStatus` + `stepIssues`, with three new smoke-test assertions guarding the regression.
+Validation semantics: `(lower, best, upper)` is treated as (P5, P50, P95) of an asymmetric distribution in log space, so the engine requires `0 < lower ≤ best ≤ upper`. Separate lower and upper sigmas ensure asymmetric triples honor all three percentiles; blank Best values use the geometric midpoint. Earlier versions used one sigma derived from the bounds, so asymmetric triples did not preserve their entered P5 and P95. Fixed in `stepLogParams` + `stepStatus` + `stepIssues`, with regression tests guarding the behavior.
 
 All-complete state shows no warnings or notices.
 
@@ -158,8 +158,12 @@ Added a `@media print` block in the inline `<style>`:
 
 What remains and prints: the question being estimated, each step's description + operator + lower/best/upper values, the result phrase, the three percentile cards, and the SVG distribution band. Backgrounds of the section cards aren't printed by default (browser setting), so the layout is mostly black-on-white with section borders intact.
 
-### P4-4. Offline-capable build (optional)
-Vendor Tailwind and Alpine into the file. File grows from ~40KB to ~120KB but works with zero network. Ship only if CDN reliability becomes an issue.
+### P4-4. Offline-capable build ✅ Done
+Both former CDN dependencies are vendored into `roughly/roughly.html`:
+- **Tailwind**: precompiled with the standalone CLI (v3.4.17, `--content roughly/roughly.html --minify`) to a ~13 KB static stylesheet covering exactly the classes the page uses, inlined as a `<style>` block in `<head>`. No Play CDN, no runtime class compilation, no production-use console warning. Regeneration instructions live in a comment above the block.
+- **Alpine 3.14.1**: the `cdn.min.js` bundle inlined as a `<script>` at the end of `<body>`, *after* the app script — Alpine's CDN build starts on a microtask, so the `alpine:init` listener must already be registered.
+
+File grew from ~63 KB to ~125 KB and now works with zero network access (offline, air-gapped, strict-egress). This also removes the CDN supply-chain exposure that SRI hashes would otherwise have been needed for.
 
 ### P4-5. Favicon, meta description, Open Graph tags ✅ Done
 - **Favicon**: inline SVG emoji (🎯) via `data:image/svg+xml,...` — keeps the file single-file with no external asset, scales crisply at any size, no separate `.ico` download.

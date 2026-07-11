@@ -12,3 +12,9 @@ Thumbs.db
 .vscode/
 .idea/
 *.swp
+
+# Internal Code Review
+docs/code-review-findings.md
+
+# Intermediate output of `npm run build:css` (deleted on success)
+tw.min.css

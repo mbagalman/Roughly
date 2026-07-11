@@ -20,11 +20,13 @@ const here = dirname(fileURLToPath(import.meta.url));
 const htmlPath = join(here, '..', 'roughly', 'roughly.html');
 const html = await readFile(htmlPath, 'utf8');
 
-// Grab the first <script> block with no `src=` attribute — that's the engine.
+// Grab the inline <script> block that defines the engine. The file contains a
+// second inline script (the vendored Alpine.js bundle), so select by content
+// rather than by position.
 const scriptMatches = [...html.matchAll(/<script\b([^>]*)>([\s\S]*?)<\/script>/g)];
-const inlineScript = scriptMatches.find(m => !/\bsrc=/.test(m[1]));
+const inlineScript = scriptMatches.find(m => !/\bsrc=/.test(m[1]) && m[2].includes('parseFermiNumber'));
 if (!inlineScript) {
-    throw new Error('Could not find an inline <script> block in roughly/roughly.html');
+    throw new Error('Could not find the engine <script> block in roughly/roughly.html');
 }
 const script = inlineScript[2];
 
@@ -35,7 +37,7 @@ const script = inlineScript[2];
 const ctx = vm.createContext({
     window: {
         addEventListener: () => {},
-        location: { search: '' },
+        location: { search: '', hash: '' },
         localStorage: { getItem: () => null, setItem: () => {} }
     },
     URLSearchParams: globalThis.URLSearchParams,
@@ -43,6 +45,8 @@ const ctx = vm.createContext({
     TextDecoder: globalThis.TextDecoder,
     btoa: globalThis.btoa,
     atob: globalThis.atob,
+    setTimeout: globalThis.setTimeout,
+    clearTimeout: globalThis.clearTimeout,
     Math, Number, Array, Float64Array, Uint8Array, JSON,
     String, parseFloat, parseInt, RegExp, Object,
     console
@@ -56,8 +60,52 @@ const {
     encodeState,
     decodeState,
     escapeMarkdownCell,
-    slugify
+    slugify,
+    fermiApp
 } = ctx;
+
+// Fresh component instance per test that needs one. init() exercises the real
+// restore path (URL hash → localStorage → defaults) against the stubbed window.
+function makeApp({ hash = '' } = {}) {
+    ctx.window.location.hash = hash;
+    const app = fermiApp();
+    app.init();
+    return app;
+}
+
+// ─── assembled page ────────────────────────────────────────────────────────
+// The vm-based tests below only execute the engine script. These static checks
+// guard the rest of the single-file build: self-containment, script ordering,
+// and the precompiled Tailwind subset. (Full in-browser behavior still needs a
+// manual check — see docs/CODE_REVIEW_2026-06-11.md.)
+
+test('assembled page: fully self-contained — no external scripts or stylesheets', () => {
+    assert.equal(/<script[^>]*\bsrc=/i.test(html), false, 'found a <script src=...>');
+    assert.equal(/<link[^>]*rel=["']?stylesheet/i.test(html), false, 'found a stylesheet <link>');
+    assert.equal(html.includes('cdn.tailwindcss.com'), false);
+});
+
+test('assembled page: app script precedes the vendored Alpine bundle', () => {
+    const inline = scriptMatches.filter(m => !/\bsrc=/.test(m[1]));
+    assert.equal(inline.length, 2, 'expected exactly two inline scripts');
+    assert.ok(inline[0][2].includes('parseFermiNumber'), 'first inline script must be the app');
+    assert.ok(inline[1][2].includes('window.Alpine'), 'second inline script must be Alpine');
+    assert.ok(inline[1][2].includes('queueMicrotask'), 'Alpine CDN build must self-start');
+});
+
+test('assembled page: precompiled Tailwind covers the class variants the page uses', () => {
+    for (const probe of [
+        '.max-md\\:min-h-11',
+        '.md\\:grid-cols-\\[2fr_auto_1fr_1fr_1fr_auto_auto_auto\\]',
+        '.print\\:hidden',
+        '.md\\:contents',
+        '.disabled\\:opacity-30',
+        '.sm\\:grid-cols-3'
+    ]) {
+        assert.ok(html.includes(probe), `compiled CSS is missing ${probe}`);
+    }
+    assert.ok(html.includes('[x-cloak]'), 'missing the x-cloak rule');
+});
 
 // ─── parseFermiNumber ──────────────────────────────────────────────────────
 
@@ -81,6 +129,7 @@ test('parseFermiNumber: scientific notation', () => {
     assert.equal(parseFermiNumber('1e6'), 1e6);
     assert.equal(parseFermiNumber('2.7e6'), 2.7e6);
     assert.equal(parseFermiNumber('1.5e-3'), 0.0015);
+    assert.equal(parseFermiNumber('1.5 e6'), 1.5e6);
 });
 
 test('parseFermiNumber: fractions', () => {
@@ -91,6 +140,18 @@ test('parseFermiNumber: fractions', () => {
 test('parseFermiNumber: percent', () => {
     assert.equal(parseFermiNumber('33%'), 0.33);
     assert.equal(parseFermiNumber('100%'), 1);
+    assert.equal(parseFermiNumber('50 %'), 0.5);
+});
+
+test('parseFermiNumber: repeated percent suffix is rejected', () => {
+    assert.equal(parseFermiNumber('5%%'), null);
+    assert.equal(parseFermiNumber('5% %'), null);
+});
+
+test('parseFermiNumber: percent binds to the fraction operand it suffixes', () => {
+    // '1/150%' = 1 / (150%) = 1 / 1.5 — pinned so a refactor doesn't silently
+    // change the semantics.
+    assert.ok(Math.abs(parseFermiNumber('1/150%') - 1 / 1.5) < 1e-12);
 });
 
 test('parseFermiNumber: comma separators and whitespace', () => {
@@ -175,6 +236,21 @@ test('monteCarloEstimate: deterministic — same inputs give byte-identical outp
     assert.equal(a.p5,  b.p5);
     assert.equal(a.p50, b.p50);
     assert.equal(a.p95, b.p95);
+});
+
+test('monteCarloEstimate: asymmetric input preserves its P5/P50/P95', () => {
+    const r = monteCarloEstimate([{ min: '10', best: '20', max: '100' }], 100_000);
+    assert.ok(r.valid);
+    assert.ok(Math.abs(r.p5 / 10 - 1) < 0.03, `P5=${r.p5}`);
+    assert.ok(Math.abs(r.p50 / 20 - 1) < 0.03, `P50=${r.p50}`);
+    assert.ok(Math.abs(r.p95 / 100 - 1) < 0.03, `P95=${r.p95}`);
+});
+
+test('monteCarloEstimate: blank best uses the geometric midpoint', () => {
+    const r = monteCarloEstimate([{ min: '10', best: '', max: '90' }], 100_000);
+    assert.ok(r.valid);
+    assert.ok(Math.abs(r.p50 / 30 - 1) < 0.03, `P50=${r.p50}`);
+    assert.equal(r.incompleteCount, 0);
 });
 
 test('monteCarloEstimate: ÷ operator divides correctly', () => {
@@ -300,4 +376,146 @@ test('slugify: blank input falls back to "estimate"', () => {
     assert.equal(slugify(''),    'estimate');
     assert.equal(slugify('   '), 'estimate');
     assert.equal(slugify(null),  'estimate');
+});
+
+// ─── monteCarloEstimate: histogram edge cases ──────────────────────────────
+
+test('monteCarloEstimate: zero-variance input yields null histograms', () => {
+    const r = monteCarloEstimate([{ min: '10', best: '10', max: '10' }]);
+    assert.ok(r.valid);
+    assert.equal(r.histograms, null);
+});
+
+// ─── fermiApp component: init / restore ────────────────────────────────────
+
+test('init: malformed hash with null step entries does not crash', () => {
+    const hash = '#e=' + encodeState({ problem: 'x', steps: [null, { min: '1', best: '2', max: '3' }] });
+    const app = makeApp({ hash });
+    assert.equal(app.problem, 'x');
+    assert.equal(app.steps.length, 2);
+    // null entry normalized to a blank step instead of throwing
+    assert.equal(app.steps[0].name, '');
+    assert.equal(app.steps[0].min, '');
+    assert.equal(app.steps[1].best, '2');
+    assert.ok(app.result.valid); // recompute() was reached
+});
+
+test('init: undecodable hash falls back to defaults', () => {
+    const app = makeApp({ hash: '#e=!!!not-base64!!!' });
+    assert.equal(app.steps.length, 3); // constructor defaults
+    assert.ok(app.result.valid);
+});
+
+test('init: restored state is capped (25 steps, 300-char problem)', () => {
+    const steps = Array.from({ length: 250 }, () => ({ min: '1', best: '2', max: '3', op: '*' }));
+    const hash = '#e=' + encodeState({ problem: 'p'.repeat(2000), steps });
+    const app = makeApp({ hash });
+    assert.equal(app.steps.length, 25);
+    assert.equal(app.problem.length, 300);
+    assert.ok(app.result.valid);
+});
+
+test('init: oversized hash token is rejected before decoding', () => {
+    // > MAX_HASH_LENGTH (80,000) of valid base64url characters — must fall back
+    // to defaults without attempting atob/JSON.parse on the payload.
+    const app = makeApp({ hash: '#e=' + 'A'.repeat(90000) });
+    assert.equal(app.steps.length, 3); // constructor defaults
+    assert.ok(app.result.valid);
+});
+
+test('addStep/duplicateStep: refuse to grow beyond the 25-step cap', () => {
+    const app = makeApp();
+    while (app.canAddStep()) app.steps.push(app.blankStep());
+    assert.equal(app.steps.length, 25);
+    app.addStep();
+    assert.equal(app.steps.length, 25);
+    app.duplicateStep(0);
+    assert.equal(app.steps.length, 25);
+});
+
+test('normalizeStep: never throws and truncates oversized fields', () => {
+    const app = makeApp();
+    for (const junk of [null, undefined, 42, 'text', [], { min: { nested: true } }]) {
+        const step = app.normalizeStep(junk);
+        assert.equal(typeof step.name, 'string');
+        assert.equal(step.op === '*' || step.op === '/', true);
+    }
+    const long = app.normalizeStep({ name: 'n'.repeat(500), min: '1'.repeat(500) });
+    assert.ok(long.name.length <= 120);
+    assert.ok(long.min.length <= 120);
+});
+
+test('steps carry unique runtime ids; serializeSteps strips them', () => {
+    const app = makeApp();
+    const ids = app.steps.map(s => s.id);
+    assert.equal(new Set(ids).size, ids.length);
+    assert.ok(ids.every(id => Number.isInteger(id)));
+    for (const s of app.serializeSteps()) {
+        assert.equal('id' in s, false);
+        assert.deepEqual(Object.keys(s).sort(), ['best', 'max', 'min', 'name', 'op']);
+    }
+});
+
+// ─── fermiApp component: row status and messages ───────────────────────────
+
+test('stepStatus: blank vs unparseable vs invalid vs valid', () => {
+    const app = makeApp();
+    assert.equal(app.stepStatus({ min: '',    best: '',  max: ''   }), 'empty');
+    assert.equal(app.stepStatus({ min: '',    best: '5', max: '10' }), 'incomplete');
+    assert.equal(app.stepStatus({ min: 'abc', best: '5', max: '10' }), 'unparseable');
+    assert.equal(app.stepStatus({ min: '0',   best: '5', max: '10' }), 'invalid');
+    assert.equal(app.stepStatus({ min: '1',   best: '5', max: '10' }), 'valid');
+    assert.equal(app.stepStatus({ min: '1',   best: '',  max: '10' }), 'valid');
+    assert.equal(app.stepStatus({ min: '0',   best: '',  max: '10' }), 'invalid');
+});
+
+test('stepIssues: filled-but-unparseable row gets a format hint, not "fill in all three"', () => {
+    const app = makeApp();
+    const issues = app.stepIssues({ min: 'abc', best: '5', max: '10' });
+    assert.equal(issues.length, 1);
+    assert.match(issues[0], /Can't read/);
+});
+
+test('stepIssues: blank best does not hide a non-positive bound', () => {
+    const app = makeApp();
+    const issues = app.stepIssues({ min: '0', best: '', max: '10' });
+    assert.equal(issues.length, 1);
+    assert.match(issues[0], /greater than zero/);
+});
+
+// ─── fermiApp component: formatting ────────────────────────────────────────
+
+test('formatValue: unit boundaries round to the next suffix, never "1000.0K"', () => {
+    const app = makeApp();
+    assert.equal(app.formatValue(999950),      '1.0M');
+    assert.equal(app.formatValue(999949),      '999.9K');
+    assert.equal(app.formatValue(999999999),   '1.0B');
+    assert.equal(app.formatValue(999.95),      '1.0K');
+    assert.equal(app.formatValue(1e12),        '1.0T');
+    assert.equal(app.formatValue(2700000),     '2.7M');
+});
+
+test('formatValue: small and degenerate values', () => {
+    const app = makeApp();
+    assert.equal(app.formatValue(0), '0');
+    assert.equal(app.formatValue(NaN), '–');
+    assert.equal(app.formatValue(0.5), '0.500');
+    assert.equal(app.formatValue(0.009), '9.00e-3');
+});
+
+// ─── fermiApp component: markdown export ───────────────────────────────────
+
+test('buildMarkdown: asterisks in the title are escaped inside the bold wrapper', () => {
+    const app = makeApp();
+    app.problem = 'rough*estimate*';
+    const md = app.buildMarkdown();
+    assert.ok(md.startsWith('**rough\\*estimate\\***'), md.split('\n')[0]);
+});
+
+test('buildMarkdown: step names with pipes do not break the table', () => {
+    const app = makeApp();
+    app.steps = [app.normalizeStep({ name: 'a|b', min: '1', best: '2', max: '3' })];
+    app.recompute();
+    const md = app.buildMarkdown();
+    assert.ok(md.includes('a\\|b'));
 });

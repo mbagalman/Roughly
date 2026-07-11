@@ -12,14 +12,14 @@ These are non-negotiable; they shape every other decision below.
 - **Browser-only persistence.** State lives in `localStorage` and (optionally) the URL hash.
 
 ## Math methodology
-The product is only as good as the math. We use **log-normal Monte Carlo**:
+The product is only as good as the math. We use **asymmetric log-normal Monte Carlo**:
 
-- Each step has a lower / best / upper value, interpreted as the 5th percentile / median / 95th percentile of a log-normal distribution.
+- Each step has lower / optional best / upper values, interpreted as the 5th percentile / median / 95th percentile in log space. Separate lower and upper spreads preserve asymmetric ranges; a blank best defaults to the geometric midpoint.
 - On every input change, sample ~10,000 trials in log-space and aggregate (multiply, divide per the step's operator) across trials.
 - Report **P5 / P50 / P95** of the resulting distribution as lower / best / upper.
 - Render a small histogram or density band of the full result distribution.
 
-Why not the naive `min*min*min` worst-case? Because with N steps the odds of every factor hitting its floor simultaneously approach zero, so the bound is uselessly wide and dishonest. Log-normal sampling is the standard practice for compounded uncertain quantities and matches how Fermi problems behave in real life. It is also cheap (10k samples × ~10 steps is sub-millisecond in the browser).
+Why not the naive `min*min*min` worst-case? Because with N steps the odds of every factor hitting its floor simultaneously approach zero, so the bound is uselessly wide and dishonest. Log-normal sampling is the standard practice for compounded uncertain quantities and matches how Fermi problems behave in real life. It is also cheap enough to rerun on every edit (10k samples × ~5 steps measures in the tens of milliseconds; recomputes are debounced ~150 ms behind typing so keystrokes stay responsive).
 
 ## Operator support
 Each step has a `×` or `÷` operator. This is required to model canonical Fermi problems correctly (piano tuners, ambulance demand, etc., all involve dividing by a per-unit rate). Multiplication is the default.
@@ -35,11 +35,11 @@ A single parser normalizes these to a numeric value. The display preserves the u
 
 ## Architecture
 - **Single file**: `roughly/roughly.html` contains markup, inline `<style>`, and inline `<script>`. No external `app.js`, `styles.css`, or `examples.json`.
-- **Dependencies**: Tailwind via CDN (`cdn.tailwindcss.com`) and Alpine.js via CDN, both pinned to specific versions (no floating `3.x.x`).
+- **Dependencies**: originally Tailwind and Alpine.js via pinned CDNs; both are now vendored into the file (a precompiled Tailwind stylesheet covering the classes the page uses, plus the Alpine 3.14.1 bundle), so the page has zero network dependencies.
 - **Samples**: inlined into the script section as a JS array.
 - **State**: a single Alpine component holds `problem`, `steps`, and computed results; persists to `localStorage` on change.
 
-Trade-off acknowledged: the single-file approach makes the file larger (~30–40KB) and slightly less ergonomic to edit, but eliminates the entire class of "did I copy all the files / are the relative paths right" deployment bugs. For a tool whose primary value prop is *drop in and go*, that trade is correct.
+Trade-off acknowledged: the single-file approach with vendored dependencies makes the file larger (~125 KB) and slightly less ergonomic to edit, but eliminates the entire class of "did I copy all the files / are the relative paths right" deployment bugs — and, with the deps inlined, the "is the CDN reachable" class too. For a tool whose primary value prop is *drop in and go*, that trade is correct.
 
 ## Feature scope (in)
 1. Smart number parser and formatter
@@ -75,6 +75,5 @@ Explicitly out of scope, to prevent creep:
 - Lighthouse accessibility score ≥ 90.
 
 ## Risks and open items
-- **CDN availability**: Tailwind/Alpine CDNs failing breaks the page. If this becomes a concern in practice, we can vendor both into the file as a follow-up (turning a 40KB file into a ~120KB file). Tracked as a P4 ticket, not done by default.
-- **Tailwind CDN script size on slow connections**: acceptable for now; revisit only if the host site has performance budgets.
+- **CDN availability**: ~~Tailwind/Alpine CDNs failing breaks the page.~~ Resolved — both dependencies are vendored into the file (P4-4 done); there are no runtime network requests at all.
 - **Host-site CSS collisions**: Tailwind's reset may interact with the host site's styles. The page is self-contained inside a `max-w-3xl` card, but if collisions appear, we'll scope styles or move to a shadow DOM wrapper.

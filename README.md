@@ -1,6 +1,6 @@
 # Roughly
 
-> A browser-only Fermi estimation tool that does the math properly. One static HTML file plus two pinned CDN scripts. Drop into any web-connected static host, link from your site.
+> A browser-only Fermi estimation tool that does the math properly. One fully self-contained static HTML file — no CDN, no build, no backend. Drop into any static host (or just open it from disk), link from your site.
 
 ## What is a Fermi estimate?
 
@@ -10,10 +10,10 @@ Most online Fermi calculators are toys. They multiply your lower bounds together
 
 ## Why this one
 
-- **Real Monte Carlo aggregation.** Each step is interpreted as a log-normal distribution (lower = 5th percentile, best = 50th, upper = 95th). 10,000 trials are propagated through your multiply/divide chain to give a *legitimate* 90% interval on the answer.
+- **Real Monte Carlo aggregation.** Each step is interpreted as an asymmetric log-normal range (lower = 5th percentile, best = 50th, upper = 95th). 10,000 trials are propagated through your multiply/divide chain to give a *legitimate* 90% interval on the answer.
 - **Per-step `×` or `÷` operator.** This is essential — and most simple calculators get it wrong. In the piano-tuners problem, the last factor (*tunings per tuner per year*) must **divide**, not multiply, because `tuners × tunings/tuner = total tunings`, not the other way around. One click flips the operator on any row.
-- **Deterministic.** A fixed-seed PRNG means identical inputs always produce identical output — across browsers, reloads, machines. Share a link, your colleague sees the *exact* same numbers down to the last digit.
-- **Single static HTML file for deployment** (~50 KB on disk). No build step, no backend, no database, no accounts, no telemetry. Two pinned CDN scripts (Tailwind + Alpine) load at first paint — see [Network requirement](#deploy-to-your-site) below; fine for any standard web host but not for fully offline / air-gapped environments without inlining the deps.
+- **Deterministic.** A fixed-seed PRNG means identical inputs always produce identical output across reloads, tabs, and shares viewed in the same browser engine. (Across *different* engines the last digits can vary slightly: ECMA-262 leaves `Math.log`/`Math.cos`/`Math.exp` implementation-defined, and those final-ulp differences compound over 10,000 trials.)
+- **Single static HTML file for deployment** (~125 KB on disk). No build step, no backend, no database, no accounts, no telemetry — and no network dependency: a precompiled Tailwind stylesheet and Alpine.js 3.14.1 are vendored into the file, so it works fully offline, air-gapped, and behind strict egress policies.
 - **Privacy-respecting by construction.** Estimates never leave your browser. `localStorage` and the URL hash are the only persistence; nothing is uploaded anywhere.
 
 ## Quick start
@@ -31,13 +31,14 @@ Then double-click `roughly/roughly.html`. That's the entire setup.
 1. Copy `roughly/roughly.html` into any folder on your static host (GitHub Pages, Netlify, Cloudflare Pages, S3, nginx, Apache, anywhere).
 2. Link to it from your site's navigation.
 
-There is no install step. **Network requirement:** at first paint the page loads Tailwind 3.4.0 from `cdn.tailwindcss.com` and Alpine.js 3.14.1 from `unpkg.com`. Visitors' browsers need outbound HTTPS to those two hosts — true for any standard public web deployment, but the page **will not render or be interactive** in fully offline, air-gapped, or strict-egress environments. To remove that dependency, inline a precompiled Tailwind stylesheet and the Alpine script into the file (the P4-4 ticket in [docs/TICKETS.md](docs/TICKETS.md) — not done by default).
+There is no install step and no network requirement: the file inlines a precompiled Tailwind stylesheet and Alpine.js 3.14.1, so it renders and is fully interactive with zero outbound requests — including offline, air-gapped, and strict-egress environments. (If you edit the markup's Tailwind classes, regenerate the inlined stylesheet — see the comment at the top of the file.)
 
 ## Features
 
 **Math & inputs**
-- Log-normal Monte Carlo engine, 10,000 trials, deterministic seed
-- Smart number parser: `2.7M`, `300K`, `1.2B`, `1e6`, `1/150`, `33%`, `2,700,000` all work
+- Asymmetric log-normal Monte Carlo engine, 10,000 trials, deterministic seed
+- Optional Best value; blank Best inputs use the geometric midpoint of Lower and Upper
+- Smart number parser: `2.7M`, `300K`, `1.2B`, `1e6`, `1.5 e6`, `1/150`, `33%`, `2,700,000` all work
 - Per-step `×` or `÷` operator with explicit error when ÷ meets zero
 - Add / remove / duplicate / reorder steps; keyboard shortcuts for power users
 - Per-cell validation (rose-tinted invalid inputs) and per-row notice when a step won't be included
@@ -70,14 +71,15 @@ There is no install step. **Network requirement:** at first paint the page loads
 
 ## How the math works
 
-Each step's `(lower, best, upper)` triple is treated as the 5th / 50th / 95th percentile of a log-normal distribution:
+Each step's `(lower, best, upper)` values are treated as the 5th / 50th / 95th percentiles of an asymmetric distribution in log space. If `best` is blank, it defaults to the geometric midpoint `sqrt(lower × upper)`. Otherwise, separate spreads below and above `best` preserve all three user-entered percentiles:
 
 - μ = ln(best)
-- σ = (ln(upper) − ln(lower)) / (2 × 1.6449)
+- σ<sub>lower</sub> = (μ − ln(lower)) / 1.6449
+- σ<sub>upper</sub> = (ln(upper) − μ) / 1.6449
 
-The constant 1.6449 is the 95th-percentile *z*-score of a standard normal. For each of 10,000 trials, we sample one value from each step's distribution, sum them in log-space (subtracting for `÷` steps), exponentiate the sum, and store the result. Sorting the array gives the empirical P5 / P50 / P95.
+The constant 1.6449 is the 95th-percentile *z*-score of a standard normal. Negative standard-normal draws use σ<sub>lower</sub>; positive draws use σ<sub>upper</sub>. For each of 10,000 trials, we sample one value from each step's distribution, sum them in log-space (subtracting for `÷` steps), exponentiate the sum, and store the result. Sorting the array gives the empirical P5 / P50 / P95.
 
-A fixed seed (`MC_SEED = 0x9E3779B1`, a golden-ratio derivative) initialises a [Mulberry32](https://gist.github.com/tommyettinger/46a3a48b7fbc9e7c7a35) PRNG at the start of every recompute, which is why identical inputs reproduce byte-identical output.
+A fixed seed (`MC_SEED = 0x9E3779B1`, a golden-ratio derivative) initialises a [Mulberry32](https://gist.github.com/tommyettinger/46a3a48b7fbc9e7c7a35) PRNG at the start of every recompute, which is why identical inputs reproduce identical output on the same browser engine. (The PRNG itself is integer-exact everywhere; the Box-Muller step uses `Math.log`/`Math.cos`, which ECMA-262 leaves implementation-defined, so results across different engines may differ in the final digits.)
 
 The same Monte Carlo samples are binned into two histograms (log-spaced and linear-spaced) for the distribution visualization — switching axis modes is instant because we don't re-run MC.
 
@@ -112,7 +114,8 @@ Unparseable input (`abc`, `5.5.5`, …) tints the cell rose and the row is exclu
 
 ```
 roughly/
-  roughly.html        The entire app: HTML + inline CSS + inline JS + inline SVG favicon
+  roughly.html        The entire app: HTML + inline CSS + inline JS + inline SVG favicon,
+                      plus vendored Tailwind (precompiled) and Alpine.js
 docs/
   PLAN.md           Goals, constraints, methodology, non-goals
   TICKETS.md        Task breakdown with acceptance criteria
@@ -125,25 +128,25 @@ package.json        `npm test` convenience script (no runtime deps)
 
 ## Tech
 
-- [Tailwind CSS 3.4.0](https://tailwindcss.com) (Play CDN) for styling
-- [Alpine.js 3.14.1](https://alpinejs.dev) (unpkg) for reactivity
+- [Tailwind CSS 3.4.17](https://tailwindcss.com) — precompiled to a static stylesheet covering exactly the classes the page uses, inlined into the file (no Play CDN, no runtime compilation)
+- [Alpine.js 3.14.1](https://alpinejs.dev) — vendored inline for reactivity
 - Vanilla JavaScript for the math engine, smart parser, Monte Carlo, log-normal sampling, and SVG rendering
 - Inline SVG for the distribution chart; no charting library
 - Native `<details>` for the help disclosure
 - `localStorage` + `history.replaceState` for persistence
 
-No build step. No `package.json`. No `npm install`. View source to read the entire app.
+No build step to deploy and no runtime dependencies. The repo's `package.json` provides two convenience scripts: `npm test`, and `npm run build:css` to regenerate the inlined Tailwind stylesheet after editing the markup's classes (compiles with the pinned `tailwindcss@3.4.17` CLI via `npx` and rewrites the vendored `<style>` block in place). View source to read the entire app.
 
 ## Running tests
 
-The math engine (`parseFermiNumber`, `monteCarloEstimate`, `mulberry32`, `encodeState` / `decodeState`, `escapeMarkdownCell`, `slugify`) is covered by a Node-based test suite at [tests/engine.test.mjs](tests/engine.test.mjs). The tests load `roughly/roughly.html` as text, extract the inline `<script>` block, and run it in a sandboxed `vm` context — so the tests exercise the *actual shipped code*, and drift between source and tests is impossible by construction.
+The math engine (`parseFermiNumber`, `monteCarloEstimate`, `mulberry32`, `encodeState` / `decodeState`, `escapeMarkdownCell`, `slugify`) and the UI component's pure logic (`formatValue`, `normalizeStep`, `stepStatus`, `buildMarkdown`, the state-restore path) are covered by a Node-based test suite at [tests/engine.test.mjs](tests/engine.test.mjs). The tests load `roughly/roughly.html` as text, extract the engine's inline `<script>` block, and run it in a sandboxed `vm` context — so the tests exercise the *actual shipped code*, and drift between source and tests is impossible by construction.
 
 Zero dev dependencies: the suite uses only Node's built-in `node:test`, `node:assert`, `node:fs`, and `node:vm`. Requires Node 20+.
 
 ```bash
 npm test
 # or, without npm:
-node --test tests/
+node --test tests/engine.test.mjs
 ```
 
 The shipped HTML also carries a tiny opt-in smoke test that runs when the page is loaded with `?test` in the URL (e.g. `roughly.html?test`). It writes pass/fail to the browser console — useful as a quick sanity check after editing the file in production.
@@ -154,7 +157,7 @@ Modern evergreen browsers (Chrome, Edge, Firefox, Safari — last two major vers
 
 ## Status
 
-Built end-to-end across the tickets in [docs/TICKETS.md](docs/TICKETS.md). Feature-complete on the original scope; the only deliberately-deferred item is vendoring the two CDN scripts into the file for a fully offline build (worth doing only if CDN reliability becomes an actual problem).
+Built end-to-end across the tickets in [docs/TICKETS.md](docs/TICKETS.md). Feature-complete on the original scope, including P4-4: the former CDN dependencies (Tailwind, Alpine) are now vendored into the file, so the page is fully self-contained and offline-capable. Post-release review findings and their resolutions are tracked in [docs/REVIEW.md](docs/REVIEW.md).
 
 ## License
 

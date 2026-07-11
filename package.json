@@ -5,7 +5,8 @@
   "type": "module",
   "description": "Roughly — a browser-only Fermi estimator. Single-file static page in roughly/roughly.html; this package.json exists only to provide a convenient `npm test` script.",
   "scripts": {
-    "test": "node --test tests/"
+    "test": "node --test tests/engine.test.mjs",
+    "build:css": "npx tailwindcss@3.4.17 --content roughly/roughly.html --output tw.min.css --minify && node scripts/inline-css.mjs"
   },
   "engines": {
     "node": ">=20"
